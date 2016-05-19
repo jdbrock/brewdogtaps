@@ -19,49 +19,67 @@ namespace BrewDogTaps
 {
     public class Program
     {
-        private static Logger _logger = LogManager.GetCurrentClassLogger();
+        // ===========================================================================
+        // = Constants
+        // ===========================================================================
 
         private const String DEVICE_ID = "GE0ESkZfSVoZIDZXNCdeSidbWRtJUV9XHE9KI0VUQlVSWFwbJVZeLGtTMEdbRgIIBwoBDF5HAj9GDRwAVUhNCBBNVwwNNQMAQAdSKiREV0lXQVwMSEcFDkMHUF9VLgACQRI=";
         private const String BASE_URL = "http://app.brewdog.com/api/";
 
-        private static String AccessToken { get; set; }
-        private static RestClient Client { get; set; }
+        // ===========================================================================
+        // = Private Fields
+        // ===========================================================================
+
+        private static Logger _logger = LogManager.GetCurrentClassLogger();
+        private static String _accessToken { get; set; }
+        private static RestClient _client;
 
         private static readonly TimeSpan _refreshInterval = TimeSpan.FromMinutes(5);
 
+        // ===========================================================================
+        // = Public Methods
+        // ===========================================================================
+        
         public static void Main(string[] args)
         {
-            _logger.Trace("Tap Hub - Brewdog Integration v0.2");
-            _logger.Trace("----------------------------------");
+            // Spit out version info.
+            _logger.Trace("BrewDog Taps v0.2");
+            _logger.Trace("-----------------");
 
+            // Set up a REST client.
+            _client = new RestClient();
+            _client.BaseUrl = new Uri(BASE_URL);
+            _client.AddDefaultHeader("X-App-Bundle", "6");
+            _client.AddDefaultHeader("User-Agent", "BrewDog/6 CFNetwork/711.5.6 Darwin/14.0.0");
+            _client.AddDefaultHeader("Accept-Language", "en-gb");
+            _client.AddDefaultHeader("Content-Type", "application/json; charset=utf-8");
+
+            // Ensure we're good to start posting to Twitter.
             EnsureTwitterAuth();
 
-            Client = new RestClient();
+            // We'll need this for transforming to titlecase later.
+            var textInfo = CultureInfo.CurrentCulture.TextInfo;
 
-            Client.BaseUrl = new Uri(BASE_URL);
-
-            Client.AddDefaultHeader("X-App-Bundle", "6");
-            Client.AddDefaultHeader("User-Agent", "BrewDog/6 CFNetwork/711.5.6 Darwin/14.0.0");
-            Client.AddDefaultHeader("Accept-Language", "en-gb");
-            Client.AddDefaultHeader("Content-Type", "application/json; charset=utf-8");
-
-            var ti = CultureInfo.CurrentCulture.TextInfo;
-
+            // Keep checking forever...
             while (true)
             {
+                // Create a new database context.
                 var db = new TapHubEntities();
 
                 _logger.Debug("Connecting to the Brewdog API...");
 
+                // Fetch data.
                 var data = FetchBarData();
                 var noChanges = true;
 
+                // If we have a valid response, process it.
                 if (data != null)
                 {
+                    // For every BrewDog bar...
                     foreach (var apiBar in data.bars)
                     {
                         // Generate the full BrewDog bar name.
-                        var barName = $"BrewDog {ti.ToTitleCase(apiBar.name)}";
+                        var barName = $"BrewDog {textInfo.ToTitleCase(apiBar.name)}";
 
                         // Create bar if it doesn't already exist.
                         var dbBar = db.Bars.FirstOrDefault(X => X.Name == barName);
@@ -77,14 +95,17 @@ namespace BrewDogTaps
                             db.SaveChanges();
                         }
 
+                        // Create a list of taps from the (old) database taps.
                         var dbTaps = dbBar.Taps
                             .ToDictionary(X => X.Name);
 
+                        // Create a list of taps from the (new) API taps.
                         var apiTaps = apiBar.data.tap
                             .Where(FilterDummyTaps)
                             .Distinct(new TapNameEqualityComparer())
                             .ToDictionary(X => X.name);
 
+                        // Work out which beer (keys) have gone off and on.
                         var goneOff = dbTaps.Keys.Except(apiTaps.Keys);
                         var goneOn = apiTaps.Keys.Except(dbTaps.Keys);
 
@@ -98,10 +119,11 @@ namespace BrewDogTaps
                         else
                             _logger.Trace($"{barNamePretty}: {apiTaps.Count} beers found. {goneOff.Count()} have gone off, {goneOn.Count()} have gone on.");
 
+                        // No changes? Skip to the next bar.
                         if (!goneOff.Any() && !goneOn.Any())
-                            continue; // Skip to the next bar.
+                            continue;
 
-                        // Create messages.
+                        // Create diff messages.
                         var messages = new List<String>();
 
                         foreach (var key in goneOff)
@@ -110,7 +132,7 @@ namespace BrewDogTaps
                         foreach (var key in goneOn)
                             messages.Add($"ON: {apiTaps[key].name}");
 
-                        // Log.
+                        // Log diffs.
                         foreach (var message in messages)
                             _logger.Debug(message);
 
@@ -156,6 +178,10 @@ namespace BrewDogTaps
             }
         }
 
+        // ===========================================================================
+        // = Private Methods
+        // ===========================================================================
+        
         //private static void SendNotification(String message, String barName)
         //{
         //    if (barName != "BrewDog EDINBURGH")
@@ -240,9 +266,9 @@ namespace BrewDogTaps
                 EnsureToken();
 
                 var request = new RestRequest("bars.json", Method.POST);
-                request.AddHeader("X-App-Token", AccessToken);
+                request.AddHeader("X-App-Token", _accessToken);
 
-                var response = Client.Execute<BarDataResponse>(request);
+                var response = _client.Execute<BarDataResponse>(request);
 
                 if (response.StatusCode != HttpStatusCode.OK)
                     throw new ApplicationException($"Error. Received Status Code: {response.StatusCode}");
@@ -261,12 +287,12 @@ namespace BrewDogTaps
             var request = new RestRequest("device.json", Method.POST);
             request.AddJsonBody(new AccessTokenRequest { id = DEVICE_ID });
 
-            var response = Client.Execute<AccessTokenResponse>(request);
+            var response = _client.Execute<AccessTokenResponse>(request);
 
             if (response.StatusCode != HttpStatusCode.OK)
                 throw new ApplicationException($"Error. Received Status Code: {response.StatusCode}");
 
-            AccessToken = response.Data.token;
+            _accessToken = response.Data.token;
         }
 
         private class TapNameEqualityComparer : IEqualityComparer<Tap>
